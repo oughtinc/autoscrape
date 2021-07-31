@@ -66,7 +66,7 @@ from collections import defaultdict, namedtuple, OrderedDict
 sample = """<html>
   <div class="article" id="art1">
     <h2 id="yy">John Doe</h2>
-    <h2 id="ww"><a>Jane Smith</a></h2>
+    <h2 id="ww"><a>Jane Smithx</a></h2>
     <p>Title: <span class="title small">The great article</span><span class="annotation">(out of print)</span></p>
   </div>
   <div class="article">
@@ -74,6 +74,7 @@ sample = """<html>
     <p class="annotation">Guest contributor</p>
     <p>Title: <span id="x">A small book</span>(out of stock)</p>
   </div>
+  <div id="otherel">Something else<a id="fakejane">Jane Smith</a></div>
 </html>"""
 
 #with open("./tests/websites/fsi.html") as f:
@@ -192,7 +193,7 @@ class PathInductor():
         self.n_elements = sum(1 for _ in tree.iter())
 
         self.field_prob = OrderedDict() # {[element]: sparse.COO(templates, fields, levels)}
-
+        self.children_consider_this_parent = {}
         #self.field_prob = {f: {} for f in self.fields}  # [field, element, template, level] probabilities
 
         self.itemness_prob = defaultdict(float) # by (element) -- this is computed by the model
@@ -305,12 +306,7 @@ class PathInductor():
                     self.field_prob[ce][ti, field_index, 0] = template_prob
                     self.template_fields_by_value[value].add((ti, field))
 
-        #for ce in set.union(*self.content_elements_by_parent.values()):
-        #    ce.update_template_other_prob()
-
     def update_el_probs(self, element, consider_parents=False):
-
-
         # PARENT CONTRIBUTIONS
         parent = element.getparent()
         if consider_parents:
@@ -330,11 +326,13 @@ class PathInductor():
         # CHILDRENS' CONTRIBUTIONS
         if isinstance(element, lxml.etree.ElementBase):
             current_field_prob = self.field_prob.get(element, None)
-            children_consider_this_parent = consider_parents or (np.sum(current_field_prob) > 0 if current_field_prob is not None else False)
+            self.children_consider_this_parent[element] = (consider_parents or
+                                                           (np.sum(current_field_prob) > 0 if current_field_prob is not None else False) or
+                                                           self.children_consider_this_parent.get(element, False))
 
             children_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
             for child in itertools.chain(element.iterchildren(), self.content_elements_by_parent[element]):
-                childprobs = self.update_el_probs(child, consider_parents=children_consider_this_parent)
+                childprobs = self.update_el_probs(child, consider_parents=self.children_consider_this_parent[element])
                 if childprobs is None:
                     continue
                 children_tfl[:, :, 1:] += childprobs[:, :, :-1]
@@ -375,12 +373,46 @@ class PathInductor():
                                    parent_children_templates_agree *
                                    children_any_other_or_no_level)
 
+                if False and element.xpath("@id") == ["fakejane"]:
+                    print("-------")
+                    print("tfl_active", tfl_active)
+                    print("tfl_wrongchild", tfl_wrongchild)
+                    print("tfl_wrongparent", tfl_wrongparent)
+                    print("-------")
+                    print("parent_tfl", parent_tfl)
+                    print("children_tfl", children_tfl)
+                    print("no_other_competitor", no_other_competitor)
+                    print("exactly one other competitor", exactly_one_other_competitor)
+                    print("parent_no_other_templates", parent_no_other_templates)
+                    print("children_no_other_templates", children_no_other_templates)
+                    print("children_no_other_levels", children_no_other_levels)
+
                 tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrongchild + tfl_wrongparent), out=tfl_active, where=tfl_active > 0)
             else:
+                # initially, this is applied to everything. This is because initially, all parents are zero, and so we pass down (consider_parents=False OR thisnnzero=False) everywhere.
+
+                if self.children_consider_this_parent[element]:  # this would be an element that has nonzero tfl, but sits directly underneath an all-zero one
+                    has_one_nonzero_template = np.sum(np.prod(np.sum(children_tfl, 2, keepdims=True), 1, keepdims=True)) > 0
+                else:
+                    has_one_nonzero_template = 1
+
                 tfl_active = (children_tfl *
                               children_no_other_templates *
-                              children_no_other_levels)
+                              children_no_other_levels *
+                              has_one_nonzero_template)
                 tfl_wrong_topchild = children_any_other_or_no_level
+
+                if element.xpath("@id") == ["otherel"]:
+                    print("-------")
+                    print("tfl_active", tfl_active)
+                    print("tfl_wrong_topchild", tfl_wrong_topchild)
+                    print("-------")
+                    print("children consider this parent", self.children_consider_this_parent[element])
+                    print("children_tfl", children_tfl)
+                    print("children_no_other_templates", children_no_other_templates)
+                    print("children_no_other_levels", children_no_other_levels)
+                    print("has one nonzero template", has_one_nonzero_template)
+
                 tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrong_topchild), out=tfl_active, where=tfl_active > 0)
 
         elif isinstance(element, ContentElement):
@@ -398,7 +430,13 @@ class PathInductor():
                 tfl_wrong_top_content_child = (self_invtfl * exactly_one_other_competitor)
                 tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrong_top_content_child), out=tfl_active, where=tfl_active > 0)
 
-        self.field_prob[element] = tfl_active
+
+        if np.sum(tfl_active) or element in self.field_prob:
+            # add new ones if they have a nonzero probability of being /something/,
+            # or update existing ones (because sometimes we need to update with all-zero).
+            # but otherwise, don't waste memory storing all-zero results
+            self.field_prob[element] = tfl_active
+
         return tfl_active if np.sum(tfl_active) else None
 
     def update_competitor_probabilities(self, el):
