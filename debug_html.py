@@ -3,31 +3,34 @@
 import pandas as pd
 
 def render_debug_html(title, fields, n_templates, field_tfl_active,
-                      field_tfl_first_wrong_child,
-                      field_tfl_wrong_parent,
+                      field_tfl_inactive,
                       children_field_tfl,
                       parent_field_tfl,
                       parent_no_other_field_templates,
                       children_contain_no_item,
                       children_no_other_field_templates,
-                      children_debug_html
-                      ):
+                      no_other_field_competitor,
+                      exactly_one_field_competitor,
+                      children_debug_html,
+                      item_tl_active,
+                      children_item_tl,
+                      parent_item_tl,
+                      no_other_item_competitor,
+                      exactly_one_other_item_competitor,
+                      no_other_item_level):
+
     fm = lambda x: "" if x == 0 else '{:.0%}'.format(x)
     return f"""
         <div style="background: rgba(0, 0, 0, 0.04)">
           <h2>{title}</h2>
           <div style="display: flex">
             <div class="datatable">
-            <h3>TFL active</h3>
+            <h3>TFL active (pre normalization!)</h3>
             {"".join([pd.DataFrame(field_tfl_active[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
             <div class="datatable">
-            <h3>TFL first wrong child</h3>
-            {"".join([pd.DataFrame(field_tfl_first_wrong_child[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
-            </div>
-            <div class="datatable">
-            <h3>TFL wrong parent</h3>
-            {"".join([pd.DataFrame(field_tfl_wrong_parent[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
+            <h3>TFL inactive (pre normalization!)</h3>
+            {"".join([pd.DataFrame(field_tfl_inactive[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
           </div>
           <div style="display: flex; color: navy;">
@@ -44,12 +47,46 @@ def render_debug_html(title, fields, n_templates, field_tfl_active,
             {"".join([pd.DataFrame(parent_no_other_field_templates[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
             <div class="datatable">
+            <h3>no other field competitor</h3>
+            {"".join([pd.DataFrame(no_other_field_competitor[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
+            </div>
+            <div class="datatable">
+            <h3>exactly one field competitor</h3>
+            {"".join([pd.DataFrame(exactly_one_field_competitor[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
+            </div>
+            <div class="datatable">
             <h3>children_contain_no_item</h3>
             {"".join([pd.DataFrame(children_contain_no_item[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
             <div class="datatable">
             <h3>children_no_other_field_templates</h3>
             {"".join([pd.DataFrame(children_no_other_field_templates[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
+            </div>
+          </div>
+          <div style="display: flex; color: darkgreen;">
+            <div class="datatable">
+                <h3>item_tl_active</h3>
+                {pd.DataFrame(item_tl_active).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>children_item_tl</h3>
+                {pd.DataFrame(children_item_tl).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>parent_item_tl</h3>
+                {pd.DataFrame(parent_item_tl).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>no_other_item_competitor</h3>
+                {pd.DataFrame(no_other_item_competitor).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>exactly_one_other_item_competitor</h3>
+                {pd.DataFrame(exactly_one_other_item_competitor).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>no_other_item_level</h3>
+                {pd.DataFrame(no_other_item_level).to_html(float_format=fm)}
             </div>
           </div>
           <div style="margin-left: 2rem">

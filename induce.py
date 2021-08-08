@@ -310,7 +310,7 @@ class PathInductor():
         # PARENT CONTRIBUTIONS
         parent = element.getparent()
 
-        parent_item_tl = np.zeros((self.n_templates, self.n_levels))   # zero, unless we know better
+        parent_item_tl = np.ones((self.n_templates, self.n_levels))   # zero, unless we know better
         parent_item_tl[:, :-1] = self.item_prob.get(parent, parent_item_tl)[:, 1:]
         parent_item_ancestorness_t = (np.sum(parent_item_tl[:, 1:], (1), keepdims=True)
                                       if parent in self.item_prob else 1)
@@ -330,9 +330,10 @@ class PathInductor():
 
 
         # LATERAL (SAME TFL) CONTRIBUTIONS
-        no_other_field_competitor = self.field_competitor_tfl_others_off.get(element, 1)
+        no_other_field_competitor = self.field_competitor_tfl_others_off.get(element, np.ones_like(parent_field_tfl))
         exactly_one_field_competitor = self.field_competitor_tfl_exactly_one_on
-        no_other_item_competitor = self.item_competitor_tl_others_off.get(element, 1)
+
+        no_other_item_competitor = self.item_competitor_tl_others_off.get(element, np.ones_like(parent_item_tl))
         exactly_one_other_item_competitor = self.item_competitor_tl_exactly_one_on
 
         # CHILDRENS' CONTRIBUTIONS
@@ -362,23 +363,13 @@ class PathInductor():
         item_tl_active = children_item_tl * parent_item_tl * no_other_item_level * no_other_item_competitor
         item_tl_inactive = (1 - children_item_tl) * exactly_one_other_item_competitor
 
-        item_tl_active = np.divide(item_tl_active, (item_tl_active +
-                                                      item_tl_inactive), out=item_tl_active, where=item_tl_active > 0)
-
+        item_tl_active = np.divide(item_tl_active, (item_tl_active + item_tl_inactive), out=item_tl_active, where=item_tl_active > 0)
 
         # FIELD PROBS -- COMBINING AND NORMALIZING THE CONTRIBUTIONS
         _children_field_template_inactive = 1 - np.prod(np.sum(children_field_tfl, (2), keepdims=True), (1), keepdims=True)
         children_no_other_field_templates = product_of_others(_children_field_template_inactive, (0))
 
         children_no_other_field_levels = product_of_others(children_field_invtfl, 2)  # all the others are off
-        _children_only_field_level_active = children_field_tfl * children_no_other_field_levels  # this AND no other level
-        children_any_other_or_no_field_level = (np.sum(_children_only_field_level_active, 2, keepdims=True) -
-                                                _children_only_field_level_active +  # any other level (and no other but it), or ...
-                                                np.prod(children_field_invtfl, 2, keepdims=True)) # ... no level at all
-
-        parent_children_field_templates_agree = (np.prod(_parent_field_template_inactive) * np.prod(_children_field_template_inactive) + # either all inactive, or ...
-                                                 np.sum(np.prod(all_active_combinations(_parent_field_template_inactive)  # ... exactly the same is active in both
-                                                                * all_active_combinations(_children_field_template_inactive), (0)), (0), keepdims=True))
 
         children_contain_no_item = 1 - np.sum(children_item_tl[:, 1:], (1))[:, None, None] # the children suggest that this is a level 1 or more
 
@@ -390,33 +381,29 @@ class PathInductor():
                             children_no_other_field_levels *
                             no_other_field_competitor)
 
-        field_tfl_first_wrong_child = (parent_field_tfl *  # parent is still correct, but we're the wrong sibling
-                                       children_field_invtfl *
-                                       exactly_one_field_competitor *  # but not the thing itself. TODO this is initially zero in the first pass, but could be quite a bit higher
-                                       parent_no_other_field_templates *
-                                       children_no_other_field_templates *
-                                       children_no_other_field_levels) # if we've decided that the parent is right, then all the other levels are def. also wrong
-
-        field_tfl_wrong_parent = (parent_field_invtfl *
-                                  children_field_invtfl *
-                                  exactly_one_field_competitor *  # but not the thing itself
-                                  parent_children_field_templates_agree *  # parent could have the same as the children, or none at all
-                                  children_any_other_or_no_field_level)  # children could have all levels wrong, but could also be something entirely different still
-
-        field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_first_wrong_child + field_tfl_wrong_parent), out=field_tfl_active, where=field_tfl_active > 0)
+        field_tfl_inactive = (children_field_invtfl * exactly_one_field_competitor)
 
         debug_html = render_debug_html(element.content if isinstance(element, ContentElement) else element.tag,
                                        self.fields,
                                        self.n_templates,
                                        field_tfl_active,
-                                       field_tfl_first_wrong_child,
-                                       field_tfl_wrong_parent,
+                                       field_tfl_inactive,
                                        children_field_tfl,
                                        parent_field_tfl,
                                        parent_no_other_field_templates,
                                        children_contain_no_item,
                                        children_no_other_field_templates,
-                                       children_debug_html)
+                                       no_other_field_competitor,
+                                       exactly_one_field_competitor,
+                                       children_debug_html,
+                                       item_tl_active,
+                                       children_item_tl,
+                                       parent_item_tl,
+                                       no_other_item_competitor,
+                                       exactly_one_other_item_competitor,
+                                       no_other_item_level)
+
+        field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_inactive), out=field_tfl_active, where=field_tfl_active > 0)
 
         if np.sum(field_tfl_active) or element in self.field_prob:
             # add new ones if they have a nonzero probability of being /something/,
@@ -435,13 +422,16 @@ class PathInductor():
     def update_field_competitor_probabilities(self, el):
         field_competitor_items = self.field_prob.items()
         field_competitor_tfl = np.zeros((len(field_competitor_items), self.n_templates, self.n_fields, self.n_levels))
+        field_competitor_count = np.zeros((self.n_templates, self.n_fields, self.n_levels))
         for i, (cel, tfl) in enumerate(field_competitor_items):
             field_competitor_tfl[i, ...] = tfl
+            field_competitor_count += (tfl > 0)
 
         field_competitor_tfl_others_off_full = product_of_others(1 - field_competitor_tfl, (0))  # axis 0 = other elements
 
         self.field_competitor_tfl_none_on = np.prod(1 - field_competitor_tfl, (0))
-        self.field_competitor_tfl_exactly_one_on = np.sum(field_competitor_tfl * field_competitor_tfl_others_off_full, (0))
+
+        self.field_competitor_tfl_exactly_one_on = np.where(field_competitor_count > 0, np.sum(field_competitor_tfl * field_competitor_tfl_others_off_full, (0)), 1)
         self.field_competitor_tfl_others_off = {}
         for i, (cel, _) in enumerate(field_competitor_items):
             self.field_competitor_tfl_others_off[cel] = field_competitor_tfl_others_off_full[i, ...]
@@ -449,13 +439,15 @@ class PathInductor():
     def update_item_competitor_probabilities(self, el):
         item_competitor_items = self.item_prob.items()
         item_competitor_tl = np.zeros((len(item_competitor_items), self.n_templates, self.n_levels))
+        item_competitor_count = np.zeros((self.n_templates, self.n_levels))
         for i, (cel, tl) in enumerate(item_competitor_items):
             item_competitor_tl[i, ...] = tl
+            item_competitor_count += (tl > 0)
 
         item_competitor_tl_others_off_full = product_of_others(1 - item_competitor_tl, (0))  # axis 0 = other elements
 
         self.item_competitor_tl_none_on = np.prod(1 - item_competitor_tl, (0))
-        self.item_competitor_tl_exactly_one_on = np.sum(item_competitor_tl * item_competitor_tl_others_off_full, (0))
+        self.item_competitor_tl_exactly_one_on = np.where(item_competitor_count > 0, np.sum(item_competitor_tl * item_competitor_tl_others_off_full, (0)), 1)
         self.item_competitor_tl_others_off = {}
         for i, (cel, _) in enumerate(item_competitor_items):
             self.item_competitor_tl_others_off[cel] = item_competitor_tl_others_off_full[i, ...]
@@ -620,8 +612,8 @@ class PathInductor():
     # now we want to run the loop where we continuously update the probabilities
     def approximate_probabilities(self):
         self.initialize_leaf_probs()  # finds the content elements and computes their probabilities
-        self.update_probs(tree, initial=True)
-        self._print_probs(tree)
+        self.update_probs(tree)
+        #self._print_probs(tree)
         # now we want to perform belief propagation through the network, until all the probabilities settle.
 
         n_updates = 0 # self.n_levels
