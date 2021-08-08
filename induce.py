@@ -31,6 +31,8 @@ import json
 import sparse
 from profilehooks import profile
 
+from debug_html import render_debug_html, wrap_debug_html
+
 def product_of_others(a, axes=None):
     """
     TODO document this
@@ -321,8 +323,11 @@ class PathInductor():
                             np.ones_like(parent_field_tfl_raw) * parent_item_ancestorness_t)
         parent_field_invtfl = ((1 - parent_field_tfl_raw) * (1 - parent_item_ancestorness_t) +  # initially all one
                             np.ones_like(parent_field_tfl_raw) * parent_item_ancestorness_t)
-        parent_no_other_templates = (parent_no_other_templates_raw * (1 - parent_item_ancestorness_t) +  # initially all zero (!?)
+        parent_no_other_field_templates = (parent_no_other_templates_raw * (1 - parent_item_ancestorness_t) +  # initially all zero (!?)
                                      np.ones_like(parent_no_other_templates_raw) * parent_item_ancestorness_t)
+
+        _parent_field_template_inactive = np.prod(1 - parent_field_tfl, (1, 2), keepdims=True)
+
 
         # LATERAL (SAME TFL) CONTRIBUTIONS
         no_other_field_competitor = self.field_competitor_tfl_others_off.get(element, 1)
@@ -333,15 +338,20 @@ class PathInductor():
         # CHILDRENS' CONTRIBUTIONS
         children_field_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
         children_item_tl = np.zeros((self.n_templates, self.n_levels))
+        children_debug_html = []
         if isinstance(element, lxml.etree.ElementBase):
             for child in itertools.chain(element.iterchildren(), self.content_elements_by_parent[element]):
-                child_field_probs, child_item_probs = self.update_el_probs(child)
+                child_field_probs, child_item_probs, child_debug_html = self.update_el_probs(child)
                 if child_field_probs is not None:
                     children_field_tfl[:, :, 1:] += child_field_probs[:, :, :-1]
                 if child_item_probs is not None:
                     children_item_tl[:, 1:] += child_item_probs[:, :-1]
+                children_debug_html.append(child_debug_html)
+
         elif isinstance(element, ContentElement):
             children_field_tfl = self.field_prob[element]  # just the thing itself
+
+        children_debug_html = "".join(children_debug_html)
 
         children_item_tl[:, 0] = np.prod(np.sum(children_field_tfl, (2)), (1))
         children_field_invtfl = 1 - children_field_tfl
@@ -366,15 +376,12 @@ class PathInductor():
                                                 _children_only_field_level_active +  # any other level (and no other but it), or ...
                                                 np.prod(children_field_invtfl, 2, keepdims=True)) # ... no level at all
 
-        _parent_field_template_inactive = np.prod(1 - parent_field_tfl, (1, 2), keepdims=True)
-        parent_no_other_field_templates = product_of_others(_parent_field_template_inactive, (0))
         parent_children_field_templates_agree = (np.prod(_parent_field_template_inactive) * np.prod(_children_field_template_inactive) + # either all inactive, or ...
                                                  np.sum(np.prod(all_active_combinations(_parent_field_template_inactive)  # ... exactly the same is active in both
                                                                 * all_active_combinations(_children_field_template_inactive), (0)), (0), keepdims=True))
 
         children_contain_no_item = 1 - np.sum(children_item_tl[:, 1:], (1))[:, None, None] # the children suggest that this is a level 1 or more
 
-        # TODO don't consider children who are items
         field_tfl_active = (parent_field_tfl *
                             parent_no_other_field_templates *
                             children_field_tfl *
@@ -398,6 +405,18 @@ class PathInductor():
 
         field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_first_wrong_child + field_tfl_wrong_parent), out=field_tfl_active, where=field_tfl_active > 0)
 
+        debug_html = render_debug_html(element.content if isinstance(element, ContentElement) else element.tag,
+                                       self.fields,
+                                       self.n_templates,
+                                       field_tfl_active,
+                                       field_tfl_first_wrong_child,
+                                       field_tfl_wrong_parent,
+                                       children_field_tfl,
+                                       parent_field_tfl,
+                                       parent_no_other_field_templates,
+                                       children_contain_no_item,
+                                       children_no_other_field_templates,
+                                       children_debug_html)
 
         if np.sum(field_tfl_active) or element in self.field_prob:
             # add new ones if they have a nonzero probability of being /something/,
@@ -408,7 +427,9 @@ class PathInductor():
         if np.sum(item_tl_active) or element in self.item_prob:
             self.item_prob[element] = item_tl_active
 
-        return (field_tfl_active if np.sum(field_tfl_active) else None, item_tl_active if np.sum(item_tl_active) else None)
+        return (field_tfl_active if np.sum(field_tfl_active) else None,
+                item_tl_active if np.sum(item_tl_active) else None,
+                debug_html)
 
 
     def update_field_competitor_probabilities(self, el):
@@ -442,7 +463,10 @@ class PathInductor():
     def update_probs(self, el, initial=False):
         self.update_field_competitor_probabilities(el)
         self.update_item_competitor_probabilities(el)
-        self.update_el_probs(tree)
+        _field_tfl, _item_tfl, debug_html = self.update_el_probs(tree)
+
+        with open("/tmp/out.html", "w") as f:
+            f.write(wrap_debug_html(debug_html))
 
     def _print_probs(self, el, depth=0):
         if depth == 0:
