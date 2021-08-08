@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
 
+sample = """<html>
+  <div class="article" id="art1">
+    <h2 id="yy">John Doe</h2><li>Jane Smith</li>
+    <p>Title: <span class="title small">The great article</span><span class="annotation">(out of print)</span></p>
+  </div>
+  <div class="article">
+    <h2><a>Jane Smith</a></h2>
+    <p>Title: <span id="x">A small book</span>(out of stock)</p>
+  </div>
+  <div id="otherel">Something else<a id="fakejane">Jane Smith</a><span>A small book</span></div>
+</html>"""
+
+templates = ["""Author: John Doe
+Title: The great article""",
+"""Author: Jane Smith
+Title: A small book"""]
+
 from pprint import pprint, pformat
 from lxml import etree
 from lxml.etree import XML, ElementTree
@@ -63,28 +80,11 @@ def css(css_selector):
 import re
 from collections import defaultdict, namedtuple, OrderedDict
 
-sample = """<html>
-  <div class="article" id="art1">
-    <h2 id="yy">John Doe</h2>
-    <h2 id="ww"><a>Jane Smithx</a></h2>
-    <p>Title: <span class="title small">The great article</span><span class="annotation">(out of print)</span></p>
-  </div>
-  <div class="article">
-    <h2><a>John Doe</a><a>Jane Smith</a></h2>
-    <p class="annotation">Guest contributor</p>
-    <p>Title: <span id="x">A small book</span>(out of stock)</p>
-  </div>
-  <div id="otherel">Something else<a id="fakejane">Jane Smith</a></div>
-</html>"""
 
 #with open("./tests/websites/fsi.html") as f:
 #    sample = f.read()
 
 
-templates = ["""Author: John Doe
-Title: The great article""",
-"""Author: Jane Smith
-Title: A small book"""]
 
 #templates = ["""Title: Contours and Controversies of Parler
 #Authors: David Thiel, Renee DiResta, Shelby Grossman, Elena Cryst""",
@@ -192,16 +192,14 @@ class PathInductor():
         self.index_of_element = {e: i for i, e in enumerate(self.element_by_index)}
         self.n_elements = sum(1 for _ in tree.iter())
 
-        self.field_prob = OrderedDict() # {[element]: sparse.COO(templates, fields, levels)}
-        self.children_consider_this_parent = {}
-        #self.field_prob = {f: {} for f in self.fields}  # [field, element, template, level] probabilities
+        self.field_prob = OrderedDict() # {[element]: np.array(templates, fields, levels)}
+        self.children_consider_this_field_parent = {}
 
-        self.itemness_prob = defaultdict(float) # by (element) -- this is computed by the model
+        self.item_prob = OrderedDict() # {[element]: np.array(templates, levels)}
+        self.children_consider_this_item_parent = {}
+
         self.item_field_level_prob = defaultdict(float)  # by (field, level) -- this is after checking for presence of children
 
-        self.template_prob = TemplateProb(self.n_templates)
-        self.template_other_prob = {} # by (element)
-        self.template_field_prob = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
         self.field_selectors = defaultdict(lambda: defaultdict(float)) # by (field, level)
         self.item_selectors = []
 
@@ -306,157 +304,141 @@ class PathInductor():
                     self.field_prob[ce][ti, field_index, 0] = template_prob
                     self.template_fields_by_value[value].add((ti, field))
 
-    def update_el_probs(self, element, consider_parents=False):
+    def update_el_probs(self, element):
         # PARENT CONTRIBUTIONS
         parent = element.getparent()
-        if consider_parents:
-            parent_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
-            if parent is not None and parent in self.field_prob:
-                parentprobs = self.field_prob[parent]
-                parent_tfl[:, :, :-1] = parentprobs[:, :, 1:]
 
-            parent_invtfl = 1 - parent_tfl
-            _parent_template_inactive = np.prod(1 - parent_tfl, (1, 2), keepdims=True)
-            parent_no_other_templates = product_of_others(_parent_template_inactive, (0))
+        parent_item_tl = np.zeros((self.n_templates, self.n_levels))   # zero, unless we know better
+        parent_item_tl[:, :-1] = self.item_prob.get(parent, parent_item_tl)[:, 1:]
+        parent_item_ancestorness_t = (np.sum(parent_item_tl[:, 1:], (1), keepdims=True)
+                                      if parent in self.item_prob else 1)
+
+        parent_field_tfl_raw = np.ones((self.n_templates, self.n_fields, self.n_levels))   # one, unless we know better
+        parent_field_tfl_raw[:, :, :-1] = self.field_prob.get(parent, parent_field_tfl)[:, :, 1:]
+        parent_no_other_templates_raw = product_of_others(np.prod(1 - parent_field_tfl_raw, (1, 2), keepdims=True))
+
+        parent_field_tfl = (parent_field_tfl_raw * (1 - parent_item_ancestorness_t) +  # initially all one
+                            np.ones_like(parent_field_tfl_raw) * parent_item_ancestorness_t)
+        parent_field_invtfl = ((1 - parent_field_tfl_raw) * (1 - parent_item_ancestorness_t) +  # initially all one
+                            np.ones_like(parent_field_tfl_raw) * parent_item_ancestorness_t)
+        parent_no_other_templates = (parent_no_other_templates_raw * (1 - parent_item_ancestorness_t) +  # initially all zero (!?)
+                                     np.ones_like(parent_no_other_templates_raw) * parent_item_ancestorness_t)
 
         # LATERAL (SAME TFL) CONTRIBUTIONS
-        no_other_competitor = self.competitor_tfl_others_off.get(element, 1)
-        exactly_one_other_competitor = self.competitor_tfl_others_one_on.get(element, 1)
+        no_other_field_competitor = self.field_competitor_tfl_others_off.get(element, 1)
+        exactly_one_field_competitor = self.field_competitor_tfl_exactly_one_on.get(element, 1)
+        no_other_item_competitor = self.item_competitor_tfl_others_off.get(element, 1)
+        exactly_one_other_item_competitor = self.item_competitor_tfl_others_one_on.get(element, 1)
 
         # CHILDRENS' CONTRIBUTIONS
+        children_field_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
+        children_item_tfl = np.zeros((self.n_templates, self.n_levels))
         if isinstance(element, lxml.etree.ElementBase):
-            current_field_prob = self.field_prob.get(element, None)
-            self.children_consider_this_parent[element] = (consider_parents or
-                                                           (np.sum(current_field_prob) > 0 if current_field_prob is not None else False) or
-                                                           self.children_consider_this_parent.get(element, False))
-
-            children_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
             for child in itertools.chain(element.iterchildren(), self.content_elements_by_parent[element]):
-                childprobs = self.update_el_probs(child, consider_parents=self.children_consider_this_parent[element])
-                if childprobs is None:
-                    continue
-                children_tfl[:, :, 1:] += childprobs[:, :, :-1]
-            children_invtfl = 1 - children_tfl
-
-            _children_template_inactive = np.prod(children_invtfl, (1, 2), keepdims=True)
-            children_no_other_templates = product_of_others(_children_template_inactive, (0))
-
-            children_no_other_levels = product_of_others(children_invtfl, 2)
-            _children_only_level_active = children_tfl * children_no_other_levels
-            children_any_other_or_no_level = (np.sum(_children_only_level_active, 2, keepdims=True) -
-                                              _children_only_level_active +  # any other level, or ...
-                                              np.prod(children_invtfl, 2, keepdims=True)) # ... no level at all
-
-            if consider_parents:
-                _parent_template_active = 1 - _parent_template_inactive
-                _children_template_active = 1 - _children_template_inactive
-                parent_children_templates_agree = (np.prod(_parent_template_inactive) * np.prod(_children_template_inactive) + # either all inactive, or ...
-                                                   np.sum(np.prod(all_active_combinations(_parent_template_inactive)  # ... exactly the same is active in both
-                                                                  * all_active_combinations(_children_template_inactive), (0)), (0), keepdims=True))
-
-                tfl_active = (parent_tfl * children_tfl *
-                              no_other_competitor *
-                              parent_no_other_templates * children_no_other_templates *
-                              children_no_other_levels)
-
-                # The parent's tfl may agree with this being its child, but perhaps it's a sibling instead.
-                # In this case, the parent and children still need to be of the same template.
-                tfl_wrongchild = (parent_tfl * children_invtfl *
-                                  exactly_one_other_competitor *
-                                  parent_no_other_templates *
-                                  children_no_other_templates *
-                                  children_no_other_levels)  # if we've decided that the parent is right, then all the other levels are def. also wrong
-
-                # or the parent's tfl could be wrong, in which case this definitely isn't it.
-                tfl_wrongparent = (parent_invtfl *
-                                   no_other_competitor *
-                                   parent_children_templates_agree *
-                                   children_any_other_or_no_level)
-
-                if False and element.xpath("@id") == ["fakejane"]:
-                    print("-------")
-                    print("tfl_active", tfl_active)
-                    print("tfl_wrongchild", tfl_wrongchild)
-                    print("tfl_wrongparent", tfl_wrongparent)
-                    print("-------")
-                    print("parent_tfl", parent_tfl)
-                    print("children_tfl", children_tfl)
-                    print("no_other_competitor", no_other_competitor)
-                    print("exactly one other competitor", exactly_one_other_competitor)
-                    print("parent_no_other_templates", parent_no_other_templates)
-                    print("children_no_other_templates", children_no_other_templates)
-                    print("children_no_other_levels", children_no_other_levels)
-
-                tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrongchild + tfl_wrongparent), out=tfl_active, where=tfl_active > 0)
-            else:
-                # initially, this is applied to everything. This is because initially, all parents are zero, and so we pass down (consider_parents=False OR thisnnzero=False) everywhere.
-
-                if self.children_consider_this_parent[element]:  # this would be an element that has nonzero tfl, but sits directly underneath an all-zero one
-                    has_one_nonzero_template = np.sum(np.prod(np.sum(children_tfl, 2, keepdims=True), 1, keepdims=True)) > 0
-                else:
-                    has_one_nonzero_template = 1
-
-                tfl_active = (children_tfl *
-                              children_no_other_templates *
-                              children_no_other_levels *
-                              has_one_nonzero_template)
-                tfl_wrong_topchild = children_any_other_or_no_level
-
-                if element.xpath("@id") == ["otherel"]:
-                    print("-------")
-                    print("tfl_active", tfl_active)
-                    print("tfl_wrong_topchild", tfl_wrong_topchild)
-                    print("-------")
-                    print("children consider this parent", self.children_consider_this_parent[element])
-                    print("children_tfl", children_tfl)
-                    print("children_no_other_templates", children_no_other_templates)
-                    print("children_no_other_levels", children_no_other_levels)
-                    print("has one nonzero template", has_one_nonzero_template)
-
-                tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrong_topchild), out=tfl_active, where=tfl_active > 0)
-
+                child_field_probs, child_item_probs = self.update_el_probs(child)
+                if child_field_probs is not None:
+                    children_field_tfl[:, :, 1:] += child_field_probs[:, :, :-1]
+                if child_item_probs is not None:
+                    children_item_tfl[:, 1:] += child_item_probs[:, :-1]
         elif isinstance(element, ContentElement):
-            self_tfl = self.field_prob[element]
-            self_invtfl = 1 - self_tfl
+            children_field_tfl = self.field_prob[element]  # just the thing itself
 
-            if consider_parents:
-                # we consider only a) whether the parents agree, and b) whether the competitors agree, and c) the original probability
-                tfl_active = (parent_tfl * self_tfl * no_other_competitor)
-                tfl_wrong_content_child = (parent_tfl * self_invtfl * exactly_one_other_competitor)
-                tfl_wrongparent = (parent_invtfl * self_invtfl * exactly_one_other_competitor)
-                tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrong_content_child + tfl_wrongparent), out=tfl_active, where=tfl_active > 0)
-            else:
-                tfl_active = (self_tfl * no_other_competitor)
-                tfl_wrong_top_content_child = (self_invtfl * exactly_one_other_competitor)
-                tfl_active = np.divide(tfl_active, (tfl_active + tfl_wrong_top_content_child), out=tfl_active, where=tfl_active > 0)
+        children_item_tfl[:, 0] = np.prod(np.sum(children_field_tfl, (2)), (1))
 
 
-        if np.sum(tfl_active) or element in self.field_prob:
+        # ITEM PROBS -- COMBINING AND NORMALIZING THE CONTRIBUTIONS
+
+        item_tfl_active = children_item_tfl * parent_item_tfl * no_other_item_level * no_other_item_competitor
+        item_tfl_inactive = (1 - children_item_tfl) * one_other_item_competitor
+
+        item_tfl_active = np.divide(item_tfl_active, (item_tfl_active +
+                                                      item_tfl_inactive), out=item_tfl_active, where=item_tfl_active > 0)
+
+
+        # FIELD PROBS -- COMBINING AND NORMALIZING THE CONTRIBUTIONS
+        _children_field_template_inactive = 1 - np.prod(np.sum(children_field_tfl, (2), keepdims=True), (1), keepdims=True)
+        children_no_other_field_templates = product_of_others(_children_field_template_inactive, (0))
+
+        children_no_other_field_levels = product_of_others(children_field_invtfl, 2)  # all the others are off
+        _children_only_field_level_active = children_field_tfl * children_no_other_field_levels  # this AND no other level
+        children_any_other_or_no_field_level = (np.sum(_children_only_field_level_active, 2, keepdims=True) -
+                                                _children_only_field_level_active +  # any other level (and no other but it), or ...
+                                                np.prod(children_field_invtfl, 2, keepdims=True)) # ... no level at all
+
+        parent_children_field_templates_agree = (np.prod(_parent_field_template_inactive) * np.prod(_children_field_template_inactive) + # either all inactive, or ...
+                                                 np.sum(np.prod(all_active_combinations(_parent_field_template_inactive)  # ... exactly the same is active in both
+                                                                * all_active_combinations(_children_field_template_inactive), (0)), (0), keepdims=True))
+
+
+        field_tfl_active = (parent_field_tfl *
+                            parent_no_other_field_templates *
+                            children_field_tfl *
+                            children_no_other_field_templates *
+                            children_no_other_field_levels *
+                            no_other_field_competitor)
+
+        field_tfl_first_wrong_child = (parent_field_tfl *  # parent is still correct, but we're the wrong sibling
+                                       children_field_invtfl *
+                                       exactly_one_field_competitor *  # but not the thing itself. TODO this is initially zero in the first pass, but could be quite a bit higher
+                                       parent_no_other_field_templates *
+                                       children_no_other_field_templates *
+                                       children_no_other_field_levels) # if we've decided that the parent is right, then all the other levels are def. also wrong
+
+        field_tfl_wrong_parent = (parent_field_invtfl *
+                                  children_field_invtfl *
+                                  exactly_one_field_competitor *  # but not the thing itself
+                                  parent_children_field_templates_agree *
+                                  children_any_other_or_no_field_level)  # does this doulbe up the problem?
+
+        field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_wrongchild + field_tfl_wrong_parent), out=field_tfl_active, where=field_tfl_active > 0)
+
+
+        if np.sum(field_tfl_active) or element in self.field_prob:
             # add new ones if they have a nonzero probability of being /something/,
             # or update existing ones (because sometimes we need to update with all-zero).
             # but otherwise, don't waste memory storing all-zero results
-            self.field_prob[element] = tfl_active
+            self.field_prob[element] = field_tfl_active
 
-        return tfl_active if np.sum(tfl_active) else None
+        if np.sum(item_tfl_active) or element in self.item_prob:
+            self.item_prob[element] = item_tfl_active
 
-    def update_competitor_probabilities(self, el):
-        competitor_items = self.field_prob.items()
-        competitor_tfl = np.zeros((len(competitor_items), self.n_templates, self.n_fields, self.n_levels))
-        for i, (cel, tfl) in enumerate(competitor_items):
-            competitor_tfl[i, ...] = tfl
+        return (field_tfl_active if np.sum(field_tfl_active) else None, item_tfl_active if np.sum(item_tfl_active) else None)
 
-        competitor_tfl_others_off_full = product_of_others(1 - competitor_tfl, (0))  # axis 0 = other elements
-        competitor_tfl_others_one_on_full = np.sum(competitor_tfl * competitor_tfl_others_off_full, (0), keepdims=True) - (competitor_tfl * competitor_tfl_others_off_full)
+    def update_field_competitor_probabilities(self, el):
+        field_competitor_items = self.field_prob.items()
+        field_competitor_tfl = np.zeros((len(field_competitor_items), self.n_templates, self.n_fields, self.n_levels))
+        for i, (cel, tfl) in enumerate(field_competitor_items):
+            field_competitor_tfl[i, ...] = tfl
 
-        self.competitor_tfl_none_on = np.prod(1 - competitor_tfl, (0))
-        self.competitor_tfl_others_off = {}
-        self.competitor_tfl_others_one_on = {}
-        for i, (cel, _) in enumerate(competitor_items):
-            self.competitor_tfl_others_off[cel] = competitor_tfl_others_off_full[i, ...]
-            self.competitor_tfl_others_one_on[cel] = competitor_tfl_others_one_on_full[i, ...]
+        field_competitor_tfl_others_off_full = product_of_others(1 - field_competitor_tfl, (0))  # axis 0 = other elements
+        field_competitor_tfl_exactly_one_on_full = np.sum(field_competitor_tfl * field_competitor_tfl_others_off_full, (0), keepdims=True)
+
+        self.field_competitor_tfl_none_on = np.prod(1 - field_competitor_tfl, (0))
+        self.field_competitor_tfl_others_off = {}
+        self.field_competitor_tfl_others_one_on = {}
+        for i, (cel, _) in enumerate(field_competitor_items):
+            self.field_competitor_tfl_others_off[cel] = field_competitor_tfl_others_off_full[i, ...]
+            self.field_competitor_tfl_exactly_one_on[cel] = field_competitor_tfl_exactly_one_on_full[i, ...]
+
+    def update_item_competitor_probabilities(self, el):
+        item_competitor_items = self.item_prob.items()
+        item_competitor_tl = np.zeros((len(item_competitor_items), self.n_templates, self.n_levels))
+        for i, (cel, tl) in enumerate(item_competitor_items):
+            item_competitor_tl[i, ...] = tl
+
+        item_competitor_tl_others_off_full = product_of_others(1 - item_competitor_tl, (0))  # axis 0 = other elements
+        item_competitor_tl_others_one_on_full = np.sum(item_competitor_tl * item_competitor_tl_others_off_full, (0), keepdims=True) - (item_competitor_tl * item_competitor_tl_others_off_full)
+
+        self.item_competitor_tl_none_on = np.prod(1 - item_competitor_tl, (0))
+        self.item_competitor_tl_others_off = {}
+        self.item_competitor_tl_others_one_on = {}
+        for i, (cel, _) in enumerate(item_competitor_items):
+            self.item_competitor_tl_others_off[cel] = item_competitor_tl_others_off_full[i, ...]
+            self.item_competitor_tl_others_one_on[cel] = item_competitor_tl_others_one_on_full[i, ...]
 
     def update_probs(self, el, initial=False):
-        self.update_competitor_probabilities(el)
+        self.update_field_competitor_probabilities(el)
+        self.update_item_competitor_probabilities(el)
         self.update_el_probs(tree, consider_parents=False)
 
     def _print_probs(self, el, depth=0):
@@ -471,55 +453,24 @@ class PathInductor():
         for c in el.iterchildren():
             self._print_probs(c, depth + 1)
 
-    def update_item_model(self, full_items_only=False):
-        """
-        Go through all of the elements for which we have field_prob
-        *or* through all which qualify as items, and count the occurence (or absence) of covered fields.
+    def update_item_model(self):
+        competitor_items = self.field_prob.items()
+        competitor_tfl = np.zeros((len(competitor_items), self.n_templates, self.n_fields, self.n_levels))
+        for i, (cel, tfl) in enumerate(competitor_items):
+            competitor_tfl[i, ...] = tfl
 
-        TODO if not full_items_only, consider missing fields too
-        """
-        element_has_all_fields = defaultdict(lambda: False)
-        if full_items_only:
-            element_has_fields = defaultdict(set)
-            for field, elementlevelprobs in self.field_prob.items():
-                for element, levelprobs in elementlevelprobs.items():
-                    for level, prob in levelprobs.items():
-                        element_has_fields[element].add(field)
-                    for element, fields in element_has_fields.items():
-                        element_has_all_fields[element] = len(fields) == self.n_fields
+        total_prob_of_field = np.sum(competitor_tfl, (3)) # sum across levels
+        total_prob_of_template = np.prod(total_prob_of_field, (2)) # multiply across fields
+        prob_of_item = total_prob_of_template * product_of_others(1 - total_prob_of_template, (0))
+        any_one_item = np.sum(prob_of_item, (0), keepdims=True)
+        prob_of_item = np.divide(prob_of_item, any_one_item, out=prob_of_item, where=prob_of_item > 0)
+        print("prob_of_template")
+        print(total_prob_of_template)
+        print("prob of item is")
+        print(prob_of_item)
+        print("sum prob of item across elements (for each template)")
+        print(np.sum(prob_of_item, 0))
 
-        field_level_combos_found = defaultdict(int)
-        levels_found_by_field = defaultdict(int)
-        for field, elementlevelprobs in self.field_prob.items():
-            for element, levelprobs in elementlevelprobs.items():
-                for level, prob in levelprobs.items():
-                    if (not full_items_only) or element_has_all_fields[element]:
-                        field_level_combos_found[field, level] += prob
-                        levels_found_by_field[field] += prob
-
-        # an item: for each field, has a certain distribution what the levels are:
-        for (field, level), combos_found in field_level_combos_found.items():
-            self.item_field_level_prob[field, level] = (combos_found / levels_found_by_field[field]) if levels_found_by_field[field] else 0.0
-
-        # when an element has a high probability of being a parent of multiple fields, its itemness goes up.
-        # however, we then infer the selectors for items, and next time, only the items with high selector prob become items.
-        # TODO also generate what kinds of items these things are
-        element_itemness_estimate = defaultdict(lambda: defaultdict(float))
-
-        for field, elementlevelprobs in self.field_prob.items():
-            for element, levelprobs in elementlevelprobs.items():
-                for level, prob in levelprobs.items():
-                    if (not full_items_only) or element_has_all_fields[element]:
-                        element_itemness_estimate[element][field, level] += prob * self.item_field_level_prob[field, level]
-
-        # clear out previous itemness_probs, then fill them in if the item_prob is large enough.
-        self.itemness_prob = defaultdict(float)
-        for element, fieldprobs in element_itemness_estimate.items():
-            element_item_prob = sum(fieldprobs.values()) / len(self.fields)  # itemprob is the average prob over the fields.
-            if element_item_prob > 0.01:
-                self.itemness_prob[element] = element_item_prob
-            else:
-                self.itemness_prob.pop(element, None)
 
 
     def generate_field_selectors(self):
@@ -560,7 +511,7 @@ class PathInductor():
     def generate_item_selectors(self):
         # TODO choose items that have enough itemness, pruning some if necessary, and generate selectors for those.
         itemness_by_tag = defaultdict(dict)
-        for element, itemness in self.itemness_prob.items():
+        for element, itemness in self.item_prob.items():
             itemness_by_tag[element.tag][element] = itemness
 
         element_by_tag = defaultdict(list)
@@ -646,15 +597,16 @@ class PathInductor():
         self._print_probs(tree)
         # now we want to perform belief propagation through the network, until all the probabilities settle.
 
-        n_updates = self.n_levels
+        n_updates = 0 # self.n_levels
         for i in range(n_updates):
             self.update_probs(tree)
         if n_updates > 0:
             self._print_probs(tree)
 
-        sys.exit()
         # now let's look at what the items are like.
-        self.update_item_model(full_items_only=True)
+        self.update_item_model()
+
+        sys.exit()
 
         # build the initial item model based on full-coverage items only.
         self.generate_field_selectors()
