@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 
 sample = """<html>
-  <div class="article" id="art1">
-    <h2 id="yy">John Doe</h2><li>Jane Smith</li>
-    <p>Title: <span class="title small">The great article</span><span class="annotation">(out of print)</span></p>
-  </div>
-  <div class="article">
-    <h2><a>Jane Smith</a></h2>
-    <p>Title: <span id="x">A small book</span>(out of stock)</p>
-  </div>
-  <div id="otherel">Something else<a id="fakejane">Jane Smith</a><span>A small book</span></div>
+  <body>
+    <div class="article" id="art1">
+      <h2 id="yy">John Doe</h2><li>Jane Smith</li>
+      <p>Title: <span class="title small">The great article</span><span class="annotation">(out of print)</span></p>
+    </div>
+    <div class="article">
+      <h2><a>Jane Smith</a></h2>
+      <p>Title: <span id="x">A small book</span>(out of stock)</p>
+    </div>
+    <div id="otherel">Something else<a id="fakejane">Jane Smith</a><span>A small book</span></div>
+  <body>
 </html>"""
 
 templates = ["""Author: John Doe
@@ -50,6 +52,31 @@ def product_of_others(a, axes=None):
     a = np.transpose(a, new_ax_order)
     a = np.reshape(a, [original_shape[ax] for ax in other_axes] + [np.prod([original_shape[ax] for ax in axes])])
 
+    after = np.concatenate([a[..., 1:], np.ones_like(a[..., 0:1])], axis=-1)
+    before = np.concatenate([np.ones_like(a[..., 0:1]), a[..., :-1]], axis=-1)
+    after_prod = np.cumprod(after[..., ::-1], axis=-1)[..., ::-1]
+    before_prod = np.cumprod(before, axis=-1)
+
+    out = np.reshape(after_prod * before_prod, [original_shape[ax] for ax in other_axes] + [original_shape[ax] for ax in axes])
+    out = np.transpose(out, old_ax_order)
+
+    return out
+
+def one_of_others_is_on(a, axes=None):
+    if axes is None:
+        axes = tuple(range(a.ndim))
+    if isinstance(axes, int):
+        axes = (axes,)
+
+    # flatten the desired axes into one last dimension
+    original_shape = a.shape
+    other_axes = tuple([ax for ax in range(a.ndim) if ax not in axes])
+    new_ax_order = other_axes + axes
+    old_ax_order = np.argsort(new_ax_order)
+    a = np.transpose(a, new_ax_order)
+    a = np.reshape(a, [original_shape[ax] for ax in other_axes] + [np.prod([original_shape[ax] for ax in axes])])
+
+    # create an after and a before, and then do a multiplication thing.
     after = np.concatenate([a[..., 1:], np.ones_like(a[..., 0:1])], axis=-1)
     before = np.concatenate([np.ones_like(a[..., 0:1]), a[..., :-1]], axis=-1)
     after_prod = np.cumprod(after[..., ::-1], axis=-1)[..., ::-1]
@@ -306,14 +333,18 @@ class PathInductor():
                     self.field_prob[ce][ti, field_index, 0] = template_prob
                     self.template_fields_by_value[value].add((ti, field))
 
-    def update_el_probs(self, element):
+    def update_el_probs(self, element, print_debug=False):
         # PARENT CONTRIBUTIONS
         parent = element.getparent()
 
-        parent_item_tl = np.ones((self.n_templates, self.n_levels))   # zero, unless we know better
-        parent_item_tl[:, :-1] = self.item_prob.get(parent, parent_item_tl)[:, 1:]
-        parent_item_ancestorness_t = (np.sum(parent_item_tl[:, 1:], (1), keepdims=True)
-                                      if parent in self.item_prob else 1)
+        # probability of this being an item, according to the parent
+        parent_item_tl = np.ones((self.n_templates, self.n_levels))  # 17%, because we have no idea, initially
+        if parent in self.item_prob:
+            parent_item_tl[:, :-1] = self.item_prob.get(parent, parent_item_tl)[:, 1:]    # we then take the item_prob from above and shift it down
+            parent_item_ancestorness_t = np.sum(parent_item_tl[:, 1:], (1), keepdims=True)
+        else:
+            # when we first iterate down, item_prob for the parent hasn't been set yet, so this is all ones
+            parent_item_ancestorness_t = 1
 
         parent_field_tfl_raw = np.ones((self.n_templates, self.n_fields, self.n_levels))   # one, unless we know better
         parent_field_tfl_raw[:, :, :-1] = self.field_prob.get(parent, parent_field_tfl_raw)[:, :, 1:]
@@ -331,10 +362,10 @@ class PathInductor():
 
         # LATERAL (SAME TFL) CONTRIBUTIONS
         no_other_field_competitor = self.field_competitor_tfl_others_off.get(element, np.ones_like(parent_field_tfl))
-        exactly_one_field_competitor = self.field_competitor_tfl_exactly_one_on
+        exactly_one_field_competitor = self.field_competitor_tfl_exactly_one_other_on.get(element, np.ones_like(parent_field_tfl))
 
         no_other_item_competitor = self.item_competitor_tl_others_off.get(element, np.ones_like(parent_item_tl))
-        exactly_one_other_item_competitor = self.item_competitor_tl_exactly_one_on
+        exactly_one_other_item_competitor = self.item_competitor_tl_exactly_one_other_on.get(element, np.ones_like(parent_item_tl))
 
         # CHILDRENS' CONTRIBUTIONS
         children_field_tfl = np.zeros((self.n_templates, self.n_fields, self.n_levels))
@@ -342,7 +373,7 @@ class PathInductor():
         children_debug_html = []
         if isinstance(element, lxml.etree.ElementBase):
             for child in itertools.chain(element.iterchildren(), self.content_elements_by_parent[element]):
-                child_field_probs, child_item_probs, child_debug_html = self.update_el_probs(child)
+                child_field_probs, child_item_probs, child_debug_html = self.update_el_probs(child, print_debug)
                 if child_field_probs is not None:
                     children_field_tfl[:, :, 1:] += child_field_probs[:, :, :-1]
                 if child_item_probs is not None:
@@ -358,11 +389,17 @@ class PathInductor():
         children_field_invtfl = 1 - children_field_tfl
 
         # ITEM PROBS -- COMBINING AND NORMALIZING THE CONTRIBUTIONS
-        no_other_item_level = product_of_others(1 - children_item_tl, (1))
 
-        item_tl_active = children_item_tl * parent_item_tl * no_other_item_level * no_other_item_competitor
-        item_tl_inactive = (1 - children_item_tl) * exactly_one_other_item_competitor
+        level_zero_mask = np.ones_like(children_item_tl)
+        level_zero_mask[:, 1:] = 0
+        no_other_templates_at_level_zero = product_of_others(1 - children_item_tl * level_zero_mask, (0))
 
+        # the probability that this is an item-level-l for template t
+        #parent_item_tl = np.ones_like(parent_item_tl) # TODO TEMP
+        no_other_item_level = product_of_others(1 - (children_item_tl * parent_item_tl), (1))
+
+        item_tl_active = children_item_tl * parent_item_tl * no_other_item_level * no_other_item_competitor * no_other_templates_at_level_zero
+        item_tl_inactive = (parent_item_tl * (1 - children_item_tl) + (1 - parent_item_tl)) * exactly_one_other_item_competitor
         item_tl_active = np.divide(item_tl_active, (item_tl_active + item_tl_inactive), out=item_tl_active, where=item_tl_active > 0)
 
         # FIELD PROBS -- COMBINING AND NORMALIZING THE CONTRIBUTIONS
@@ -381,29 +418,34 @@ class PathInductor():
                             children_no_other_field_levels *
                             no_other_field_competitor)
 
-        field_tfl_inactive = (children_field_invtfl * exactly_one_field_competitor)
+        #field_tfl_inactive = (children_field_invtfl * exactly_one_field_competitor)
+        field_tfl_inactive = (parent_field_tfl * exactly_one_field_competitor + parent_field_invtfl * (exactly_one_field_competitor + no_other_field_competitor)) * children_field_invtfl / (parent_field_tfl + parent_field_invtfl)
+
+        field_tfl_active_unnormalized = np.copy(field_tfl_active)
+        field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_inactive), out=field_tfl_active, where=field_tfl_active > 0)
 
         debug_html = render_debug_html(element.content if isinstance(element, ContentElement) else element.tag,
-                                       self.fields,
-                                       self.n_templates,
-                                       field_tfl_active,
-                                       field_tfl_inactive,
-                                       children_field_tfl,
-                                       parent_field_tfl,
-                                       parent_no_other_field_templates,
-                                       children_contain_no_item,
-                                       children_no_other_field_templates,
-                                       no_other_field_competitor,
-                                       exactly_one_field_competitor,
-                                       children_debug_html,
-                                       item_tl_active,
-                                       children_item_tl,
-                                       parent_item_tl,
-                                       no_other_item_competitor,
-                                       exactly_one_other_item_competitor,
-                                       no_other_item_level)
+                                    self.fields,
+                                    self.n_templates,
+                                    field_tfl_active_unnormalized,
+                                    field_tfl_inactive,
+                                    field_tfl_active,
+                                    children_field_tfl,
+                                    parent_field_tfl,
+                                    parent_no_other_field_templates,
+                                    children_contain_no_item,
+                                    children_no_other_field_templates,
+                                    no_other_field_competitor,
+                                    exactly_one_field_competitor,
+                                    children_debug_html,
+                                    item_tl_active,
+                                    children_item_tl,
+                                    parent_item_tl,
+                                    no_other_item_competitor,
+                                    exactly_one_other_item_competitor,
+                                    no_other_templates_at_level_zero,
+                                    no_other_item_level) if print_debug else ""
 
-        field_tfl_active = np.divide(field_tfl_active, (field_tfl_active + field_tfl_inactive), out=field_tfl_active, where=field_tfl_active > 0)
 
         if np.sum(field_tfl_active) or element in self.field_prob:
             # add new ones if they have a nonzero probability of being /something/,
@@ -431,10 +473,18 @@ class PathInductor():
 
         self.field_competitor_tfl_none_on = np.prod(1 - field_competitor_tfl, (0))
 
-        self.field_competitor_tfl_exactly_one_on = np.where(field_competitor_count > 0, np.sum(field_competitor_tfl * field_competitor_tfl_others_off_full, (0)), 1)
+        only_this_on = field_competitor_tfl * field_competitor_tfl_others_off_full
+
+        # this is technically a problem, because field_competitor_tfl could be 1, in which case we divide by zero. But also, in this case, the probability of even a single other
+        # one being on should be zero, so we should be safe in setting all divisions by zero to 0/0 = 0.
+        field_competitor_tfl_exactly_one_other_on_full = np.where(field_competitor_count > 0, (np.sum(only_this_on, (0), keepdims=True) - only_this_on) / (1 - field_competitor_tfl), 0)
+        np.nan_to_num(field_competitor_tfl_exactly_one_other_on_full, False)
+
         self.field_competitor_tfl_others_off = {}
+        self.field_competitor_tfl_exactly_one_other_on = {}
         for i, (cel, _) in enumerate(field_competitor_items):
             self.field_competitor_tfl_others_off[cel] = field_competitor_tfl_others_off_full[i, ...]
+            self.field_competitor_tfl_exactly_one_other_on[cel] = field_competitor_tfl_exactly_one_other_on_full[i, ...]
 
     def update_item_competitor_probabilities(self, el):
         item_competitor_items = self.item_prob.items()
@@ -446,19 +496,25 @@ class PathInductor():
 
         item_competitor_tl_others_off_full = product_of_others(1 - item_competitor_tl, (0))  # axis 0 = other elements
 
+        only_this_on = item_competitor_tl * item_competitor_tl_others_off_full
         self.item_competitor_tl_none_on = np.prod(1 - item_competitor_tl, (0))
-        self.item_competitor_tl_exactly_one_on = np.where(item_competitor_count > 0, np.sum(item_competitor_tl * item_competitor_tl_others_off_full, (0)), 1)
+        item_competitor_tl_exactly_one_other_on_full = np.where(item_competitor_count > 0, (np.sum(only_this_on, (0), keepdims=True) - only_this_on) / (1 - item_competitor_tl), 0)
+        np.nan_to_num(item_competitor_tl_exactly_one_other_on_full, False)
+
         self.item_competitor_tl_others_off = {}
+        self.item_competitor_tl_exactly_one_other_on = {}
         for i, (cel, _) in enumerate(item_competitor_items):
             self.item_competitor_tl_others_off[cel] = item_competitor_tl_others_off_full[i, ...]
+            self.item_competitor_tl_exactly_one_other_on[cel] = item_competitor_tl_exactly_one_other_on_full[i, ...]
 
-    def update_probs(self, el, initial=False):
+    def update_probs(self, el, print_debug=False):
         self.update_field_competitor_probabilities(el)
         self.update_item_competitor_probabilities(el)
-        _field_tfl, _item_tfl, debug_html = self.update_el_probs(tree)
+        _field_tfl, _item_tfl, debug_html = self.update_el_probs(tree, print_debug)
 
-        with open("/tmp/out.html", "w") as f:
-            f.write(wrap_debug_html(debug_html))
+        if print_debug:
+            with open("/tmp/out.html", "w") as f:
+                f.write(wrap_debug_html(debug_html))
 
     def _print_probs(self, el, depth=0):
         if depth == 0:
@@ -612,15 +668,14 @@ class PathInductor():
     # now we want to run the loop where we continuously update the probabilities
     def approximate_probabilities(self):
         self.initialize_leaf_probs()  # finds the content elements and computes their probabilities
-        self.update_probs(tree)
         #self._print_probs(tree)
         # now we want to perform belief propagation through the network, until all the probabilities settle.
 
-        n_updates = 0 # self.n_levels
+        n_updates = 12 # self.n_levels
         for i in range(n_updates):
-            self.update_probs(tree)
-        if n_updates > 0:
-            self._print_probs(tree)
+            self.update_probs(tree, i == n_updates - 1)
+        #if n_updates > 0:
+        #    self._print_probs(tree)
 
         # now let's look at what the items are like.
         self.update_item_model()

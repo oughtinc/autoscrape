@@ -2,8 +2,10 @@
 
 import pandas as pd
 
-def render_debug_html(title, fields, n_templates, field_tfl_active,
+def render_debug_html(title, fields, n_templates,
+                      field_tfl_active_unnormalized,
                       field_tfl_inactive,
+                      field_tfl_active,
                       children_field_tfl,
                       parent_field_tfl,
                       parent_no_other_field_templates,
@@ -17,8 +19,8 @@ def render_debug_html(title, fields, n_templates, field_tfl_active,
                       parent_item_tl,
                       no_other_item_competitor,
                       exactly_one_other_item_competitor,
+                      no_other_templates_at_level_zero,
                       no_other_item_level):
-
     fm = lambda x: "" if x == 0 else '{:.0%}'.format(x)
     return f"""
         <div style="background: rgba(0, 0, 0, 0.04)">
@@ -26,11 +28,15 @@ def render_debug_html(title, fields, n_templates, field_tfl_active,
           <div style="display: flex">
             <div class="datatable">
             <h3>TFL active (pre normalization!)</h3>
-            {"".join([pd.DataFrame(field_tfl_active[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
+            {"".join([pd.DataFrame(field_tfl_active_unnormalized[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
             <div class="datatable">
             <h3>TFL inactive (pre normalization!)</h3>
             {"".join([pd.DataFrame(field_tfl_inactive[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
+            </div>
+            <div class="datatable">
+            <h3>TFL active (post normalization!)</h3>
+            {"".join([pd.DataFrame(field_tfl_active[ti, ...], index=fields).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
           </div>
           <div style="display: flex; color: navy;">
@@ -83,6 +89,10 @@ def render_debug_html(title, fields, n_templates, field_tfl_active,
             <div class="datatable">
                 <h3>exactly_one_other_item_competitor</h3>
                 {pd.DataFrame(exactly_one_other_item_competitor).to_html(float_format=fm)}
+            </div>
+            <div class="datatable">
+                <h3>no_other_templates_at_level_zero</h3>
+                {pd.DataFrame(no_other_templates_at_level_zero).to_html(float_format=fm)}
             </div>
             <div class="datatable">
                 <h3>no_other_item_level</h3>
