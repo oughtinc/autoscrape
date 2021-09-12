@@ -21,7 +21,7 @@ def render_debug_html(title, fields, n_templates,
                       exactly_one_other_item_competitor,
                       no_other_templates_at_level_zero,
                       no_other_item_level):
-    fm = lambda x: "" if x == 0 else '{:.0%}'.format(x)
+    fm = lambda x: "" if x == 0 else ('?' if x == -1 else '{:.0%}'.format(x))
     return f"""
         <div style="background: rgba(0, 0, 0, 0.04)">
           <h2>{title}</h2>
