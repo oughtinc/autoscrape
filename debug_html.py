@@ -9,7 +9,7 @@ def render_debug_html(title, fields, n_templates,
                       children_field_tfl,
                       parent_field_tfl,
                       parent_no_other_field_templates,
-                      children_contain_no_item,
+                      not_an_item_ancestor,
                       children_no_other_field_templates,
                       no_other_field_competitor,
                       exactly_one_field_competitor,
@@ -19,7 +19,6 @@ def render_debug_html(title, fields, n_templates,
                       parent_item_tl,
                       no_other_item_competitor,
                       exactly_one_other_item_competitor,
-                      no_other_templates_at_level_zero,
                       no_other_item_level):
     fm = lambda x: "" if x == 0 else ('?' if x == -1 else '{:.0%}'.format(x))
     return f"""
@@ -61,8 +60,8 @@ def render_debug_html(title, fields, n_templates,
             {"".join([pd.DataFrame(exactly_one_field_competitor[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
             </div>
             <div class="datatable">
-            <h3>children_contain_no_item</h3>
-            {"".join([pd.DataFrame(children_contain_no_item[ti, ...]).to_html(float_format=fm) for ti in range(n_templates)])}
+            <h3>not_an_item_ancestor</h3>
+            {not_an_item_ancestor}
             </div>
             <div class="datatable">
             <h3>children_no_other_field_templates</h3>
@@ -91,12 +90,8 @@ def render_debug_html(title, fields, n_templates,
                 {pd.DataFrame(exactly_one_other_item_competitor).to_html(float_format=fm)}
             </div>
             <div class="datatable">
-                <h3>no_other_templates_at_level_zero</h3>
-                {pd.DataFrame(no_other_templates_at_level_zero).to_html(float_format=fm)}
-            </div>
-            <div class="datatable">
                 <h3>no_other_item_level</h3>
-                {pd.DataFrame(no_other_item_level).to_html(float_format=fm)}
+                {no_other_item_level}
             </div>
           </div>
           <div style="margin-left: 2rem">
