@@ -44,39 +44,17 @@ def product_of_others(a, axes=None):
     if isinstance(axes, int):
         axes = (axes,)
 
-    # flatten the desired axes into one last dimension
+    # deal with negative axes
+    axes = tuple((ax if ax >= 0 else a.ndim + ax) for ax in axes)
+
+    # flatten the desired axes into one single last dimension
     original_shape = a.shape
     other_axes = tuple([ax for ax in range(a.ndim) if ax not in axes])
     new_ax_order = other_axes + axes
     old_ax_order = np.argsort(new_ax_order)
-    a = np.transpose(a, new_ax_order)
+    a = np.transpose(a, new_ax_order)  # reorder the axes, then flatten:
     a = np.reshape(a, [original_shape[ax] for ax in other_axes] + [np.prod([original_shape[ax] for ax in axes])])
 
-    after = np.concatenate([a[..., 1:], np.ones_like(a[..., 0:1])], axis=-1)
-    before = np.concatenate([np.ones_like(a[..., 0:1]), a[..., :-1]], axis=-1)
-    after_prod = np.cumprod(after[..., ::-1], axis=-1)[..., ::-1]
-    before_prod = np.cumprod(before, axis=-1)
-
-    out = np.reshape(after_prod * before_prod, [original_shape[ax] for ax in other_axes] + [original_shape[ax] for ax in axes])
-    out = np.transpose(out, old_ax_order)
-
-    return out
-
-def one_of_others_is_on(a, axes=None):
-    if axes is None:
-        axes = tuple(range(a.ndim))
-    if isinstance(axes, int):
-        axes = (axes,)
-
-    # flatten the desired axes into one last dimension
-    original_shape = a.shape
-    other_axes = tuple([ax for ax in range(a.ndim) if ax not in axes])
-    new_ax_order = other_axes + axes
-    old_ax_order = np.argsort(new_ax_order)
-    a = np.transpose(a, new_ax_order)
-    a = np.reshape(a, [original_shape[ax] for ax in other_axes] + [np.prod([original_shape[ax] for ax in axes])])
-
-    # create an after and a before, and then do a multiplication thing.
     after = np.concatenate([a[..., 1:], np.ones_like(a[..., 0:1])], axis=-1)
     before = np.concatenate([np.ones_like(a[..., 0:1]), a[..., :-1]], axis=-1)
     after_prod = np.cumprod(after[..., ::-1], axis=-1)[..., ::-1]
@@ -372,32 +350,31 @@ class PathInductor():
                     children_item_tls.append(child_item_probs)
                 children_debug_html.append(child_debug_html)
 
-            if len(children_item_tls):
-                children_item_tls = np.stack(children_item_tls, axis=-1)
-                children_item_tl_exactly_one = np.sum(children_item_tls * product_of_others(children_item_tls, (-1)), -1)
-                children_item_tl_none = np.prod(1 - children_item_tls, (-1))
-                item_tl_from_children = np.pad(children_item_tl_exactly_one, (0, (1, 0)))[:, :-1]
-                no_item_tl_from_children = np.pad(children_item_tl_none, (0, (1, 0)))[:, :-1]
-            else:
-                item_tl_from_children = np.zeros((self.n_templates, self.n_levels))
-                no_item_tl_from_children = np.ones((self.n_templates, self.n_levels))
-
             if len(children_field_tfls):
                 children_field_tfls = np.stack(children_field_tfls, axis=-1)
                 # of the children's TFL, exactly one is going to be active (at most).
-                children_field_tfl_exactly_one = np.sum(children_field_tfls * product_of_others(children_field_tfls, (-1)), -1)
+                children_field_tfl_exactly_one = np.sum(children_field_tfls * product_of_others(1 - children_field_tfls, (-1)), -1)
                 children_field_tfl_none = np.prod(1 - children_field_tfls, -1)
-                field_tfl_from_children = np.pad(children_field_tfl_exactly_one, (0, 0, (1, 0)))[:, :, :-1]
-                no_field_tfl_from_children = np.pad(children_field_tfl_none, (0, 0, (1, 0)))[:, :, :-1]
+                field_tfl_from_children = np.pad(children_field_tfl_exactly_one, ((0, 0), (0, 0), (1, 0)))[:, :, :-1]
+                no_field_tfl_from_children = np.pad(children_field_tfl_none, ((0, 0), (0, 0), (1, 0)))[:, :, :-1]
 
                 # of the children's TFL, we want exactly one of each field to be active; we don't care which one
-                children_field_tfl_exactly_one_any_l = np.sum(children_field_tfls * product_of_others(children_field_tfls, (-2, -1)), (-2, -1))
-                item_tl_from_children[:, 0] = np.prod(children_field_tfl_exactly_one_any_l, (1))
-                no_item_tl_from_children[:, 0] = 1 - item_tl_from_children[:, 0]
+                children_field_tfl_exactly_one_any_l = np.sum(children_field_tfls * product_of_others(1 - children_field_tfls, (-2, -1)), (-2, -1))
+                item_t0_from_children = np.prod(children_field_tfl_exactly_one_any_l, (1))[:, None]
+                no_item_t0_from_children = 1 - item_t0_from_children
             else:
                 field_tfl_from_children = np.zeros((self.n_templates, self.n_fields, self.n_levels))
                 no_field_tfl_from_children = np.ones((self.n_templates, self.n_fields, self.n_levels))
+                item_t0_from_children = np.zeros((self.n_templates, 1))
+                no_item_t0_from_children = np.ones((self.n_templates, 1))
 
+            children_item_tls = np.stack(children_item_tls, axis=-1) if len(children_item_tls) else np.zeros((self.n_templates, self.n_levels, 1))
+            children_item_tl_exactly_one = np.concatenate([item_t0_from_children, # raw prob that the thing is I(L=0)
+                                                        np.sum(children_item_tls * product_of_others(1 - children_item_tls, (-1)), (-1))], -1)[:, :-1]  # raw prob that the thing is I(L)
+            item_tl_from_children = children_item_tl_exactly_one * product_of_others(1 - children_item_tl_exactly_one, (-1))  # only one level can be active at once
+            no_item_tl_from_children = np.concatenate([no_item_t0_from_children, np.prod(1 - children_item_tls, (-1))], -1)[:, :-1] # prob that none of the children make this an item at the given TL
+
+            # TODO: deal with the situation where the child has all fields at 100%, thus I(L=0) also at 100%. This makes it impossible for the parent to have either I0 or I1, even though it should have both.
 
         elif isinstance(element, ContentElement):
             item_tl_from_children = np.zeros((self.n_templates, self.n_levels))
@@ -411,7 +388,6 @@ class PathInductor():
 
         item_tl_active = (item_tl_from_children *
                           item_tl_from_parent *
-                          no_other_item_level *  # we don't want this to be multiple item levels at once.
                           no_other_item_competitor)
 
         item_tl_inactive = no_item_tl_from_children * (
