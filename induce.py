@@ -374,7 +374,7 @@ class PathInductor():
             item_tl_from_children = children_item_tl_exactly_one * product_of_others(1 - children_item_tl_exactly_one, (-1))  # only one level can be active at once
             no_item_tl_from_children = np.concatenate([no_item_t0_from_children, np.prod(1 - children_item_tls, (-1))], -1)[:, :-1] # prob that none of the children make this an item at the given TL
 
-            # TODO: deal with the situation where the child has all fields at 100%, thus I(L=0) also at 100%. This makes it impossible for the parent to have either I0 or I1, even though it should have both.
+
 
         elif isinstance(element, ContentElement):
             item_tl_from_children = np.zeros((self.n_templates, self.n_levels))
@@ -385,6 +385,33 @@ class PathInductor():
         children_debug_html = "".join(children_debug_html)
 
         no_other_item_level = self.item_competitor_tl_other_levels_off.get(element, 1)
+
+        #########
+        # is I0 or In:
+        #   - item_tl_from_children
+        #   - item_tl_from_parent
+        #   - no_other_item_competitor
+        #   - no_other_item_level
+        #
+        # not I0:
+        #   - item_tl_from_children * (1 - item_tl_from_parent) * no_other_item_level
+        #     *OR*
+        #     no_item_tl_from_children * one_or_no_other_item_level
+        #   - exactly_one_other_item_competitor
+        #
+        # not In:  (the children definitely aren't it, or else this would be it)
+        #   - no_item_tl_from_children
+        #   - one_or_no_other_item_level
+        #   - exactly_one_other_item_competitor + (1-item_tl_from_parent) * no_other_item_competitor
+        #
+        # Initial guesses:
+        #   - item_tl_from_parent:
+        #   - (1-item_tl_from_parent):
+        #   - no_other_item_competitor:
+        #     - 1/(L-1) if item_tl_from_children is 100%
+        #     -
+        #   - exactly_one_other_item_competitor:
+        #########
 
         item_tl_active = (item_tl_from_children *
                           item_tl_from_parent *
